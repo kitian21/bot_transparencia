@@ -4,6 +4,7 @@ import re
 import shutil
 import glob
 import requests
+import urllib3 # Para silenciar advertencias
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
@@ -12,12 +13,14 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
 
-# --- LIBRERÍA NUEVA PARA LEER PDFS ---
+# SILENCIAR ADVERTENCIAS ROJAS DE SSL
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# --- LIBRERÍA PDF ---
 try:
     from pypdf import PdfReader
 except ImportError:
-    print("FALTA INSTALAR pypdf. Ejecuta: python -m pip install pypdf")
-    exit()
+    print("⚠️ FALTA INSTALAR pypdf. Ejecuta: python -m pip install pypdf")
 
 # ==========================================
 # CONFIGURACIÓN
@@ -25,7 +28,7 @@ except ImportError:
 BASE_DIR = r"C:\Users\In Data\OneDrive\Escritorio\christian\200mts o mas"
 
 COMUNAS = [
-    "Cerrillos", "Cerro Navia", "Conchalí", "El Bosque", "Estación Central", 
+    #"Cerrillos", "Cerro Navia", "Conchalí", "El Bosque", "Estación Central", 
     "Huechuraba", "Independencia", "La Cisterna", "La Florida", "La Granja", 
     "La Pintana", "La Reina", "Las Condes", "Lo Barnechea", "Lo Espejo", 
     "Lo Prado", "Macul", "Maipú", "Ñuñoa", "Pedro Aguirre Cerda", "Peñalolén", 
@@ -35,66 +38,24 @@ COMUNAS = [
 
 KEYWORDS = ["ampliación", "remodelación", "modificación", "obra nueva", "regularización", "edificación", "obra menor"]
 
-# --- LÓGICA DE FILTRO ---
-MIN_METROS_SEGURO = 200.0  # Si dice esto en la web, pasa directo.
-MIN_METROS_DUDOSO = 100.0  # Si dice esto, lo descargamos para leerlo por dentro.
+# --- FILTRO DOBLE CAPA (100 web -> Escaneo PDF) ---
+MIN_METROS_SEGURO = 200.0  
+MIN_METROS_DUDOSO = 100.0  
 
-CARPETAS_PISTA = ["obras", "edificación", "urban", "permiso", "dom", "construc", "trámites"]
+CARPETAS_PISTA = ["obras", "edificación", "urban", "permiso", "dom", "construc", "trámites", "acuerdos"]
 
 CARPETAS_IGNORAR = [
     "ley 20.898", "20.898", "cuentas", "loteo", "subdivisión", 
     "copropiedad", "certificados", "recepción", "anteproyecto", 
     "paralización", "demolición", "convenio", "decreto", "nómina", 
     "contrato", "adjudicación", "sistema", "actas", "sumarios",
-    "07.", "actos y resoluciones", "concesiones"
+    "07.", "actos y resoluciones", "concesiones", "mera tenencia", "ocupación"
 ]
 
 TEMP_DOWNLOAD_DIR = os.path.join(BASE_DIR, "Temp_Descargas")
 
 # ==========================================
-# HERRAMIENTAS DE PDF
-# ==========================================
-
-def escanear_pdf_en_busca_de_metros(ruta_archivo):
-    """
-    Abre el PDF, extrae todo el texto y busca el número más alto asociado a 'm2'.
-    Retorna el máximo encontrado.
-    """
-    print("         [🔍] Escaneando contenido del PDF...")
-    try:
-        reader = PdfReader(ruta_archivo)
-        texto_completo = ""
-        
-        # Leer todas las páginas (o las primeras 5 para ser rápido)
-        paginas_a_leer = min(len(reader.pages), 5)
-        for i in range(paginas_a_leer):
-            texto_completo += reader.pages[i].extract_text() + "\n"
-            
-        # Buscar patrones de metros: "120,5 m2", "Total: 300 mts"
-        # Regex busca números seguidos de m2/mts/metros
-        matches = re.findall(r'(\d+[\.,]?\d*)\s*(?:m2|mts2|metros|mts)', texto_completo, re.IGNORECASE)
-        
-        if not matches:
-            return 0.0
-            
-        # Convertir a floats y buscar el máximo
-        numeros = []
-        for m in matches:
-            try:
-                val = float(m.replace(",", "."))
-                numeros.append(val)
-            except: pass
-            
-        maximo = max(numeros) if numeros else 0.0
-        print(f"         [🔍] Máximo encontrado en PDF: {maximo} m2")
-        return maximo
-
-    except Exception as e:
-        print(f"         [!] No se pudo leer el PDF (¿Encriptado/Imagen?): {e}")
-        return 0.0
-
-# ==========================================
-# HERRAMIENTAS GENERALES
+# HERRAMIENTAS
 # ==========================================
 def configurar_driver():
     if not os.path.exists(TEMP_DOWNLOAD_DIR): os.makedirs(TEMP_DOWNLOAD_DIR)
@@ -112,57 +73,90 @@ def configurar_driver():
     opts.add_argument("--start-maximized")
     return webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=opts)
 
-def limpiar_texto(texto): return texto.lower().strip()
+def limpiar_texto(texto): 
+    if not texto: return ""
+    return texto.lower().strip()
 
 def extraer_metros(texto):
     match = re.search(r'(\d+[\.,]?\d*)\s*(?:m2|mts2|metros|mts)', texto, re.IGNORECASE)
     if match: 
-        numero_limpio = match.group(1).replace(",", ".")
-        try: return float(numero_limpio)
+        val_str = match.group(1)
+        if ',' in val_str and '.' in val_str:
+            val_str = val_str.replace('.', '').replace(',', '.')
+        elif ',' in val_str:
+            val_str = val_str.replace(',', '.')
+        try: return float(val_str)
         except: return 0.0
     return 0.0
 
+# ==========================================
+# ANALISTA DE PDF
+# ==========================================
+def escanear_pdf_en_busca_de_metros(ruta):
+    print("         [🔍] Escaneando PDF interno...")
+    try:
+        reader = PdfReader(ruta)
+        text = ""
+        for i in range(min(len(reader.pages), 10)): 
+            try: text += reader.pages[i].extract_text() + " "
+            except: pass
+            
+        if len(text) < 50: 
+            print("         [⚠️] PDF es imagen (Ilegible). Guardando por seguridad.")
+            return 9999.0 
+
+        text = text.replace('\n', ' ')
+        matches = re.findall(r'(\d+[\.,]?\d*)\s*(?:m2|mts|sup\.|superficie)', text, re.IGNORECASE)
+        nums = []
+        for m in matches:
+            val_str = m
+            if ',' in val_str and '.' in val_str:
+                val_str = val_str.replace('.', '').replace(',', '.')
+            elif ',' in val_str:
+                val_str = val_str.replace(',', '.')
+            try: 
+                val = float(val_str)
+                if 10 < val < 50000: nums.append(val)
+            except: pass
+            
+        if not nums: return 0.0
+        maximo = max(nums)
+        print(f"         [🔍] Máximo encontrado: {maximo} m2")
+        return maximo
+    except Exception as e: 
+        print(f"         [!] Error leyendo PDF: {e}")
+        return 9999.0 
+
+# ==========================================
+# GESTIÓN DE ARCHIVOS
+# ==========================================
 def procesar_archivo_descargado(carpeta_destino, metros_web):
-    """
-    Decide si guarda o borra el archivo basándose en la lógica de doble capa.
-    """
     time.sleep(2) 
     lista = glob.glob(os.path.join(TEMP_DOWNLOAD_DIR, "*"))
     validos = [f for f in lista if not f.endswith(".crdownload") and not f.endswith(".tmp")]
     
     if not validos: return False
-    
     nuevo = max(validos, key=os.path.getctime)
-    nombre_base = os.path.basename(nuevo)
     
-    decision_final = False
-    
-    # --- LÓGICA DE DECISIÓN ---
-    if metros_web >= MIN_METROS_SEGURO:
-        print(f"      [OK] Web dice {metros_web}m2. Guardando directo.")
-        decision_final = True
+    decision = False
+    if metros_web >= MIN_METROS_SEGURO: 
+        print(f"      [OK] Web dice {metros_web}m2. Guardando.")
+        decision = True
     else:
-        # Caso Dudoso (100 - 199): Leemos el PDF
-        metros_pdf = escanear_pdf_en_busca_de_metros(nuevo)
-        
-        if metros_pdf >= MIN_METROS_SEGURO:
-            print(f"      [OK] PDF confirma {metros_pdf}m2. Guardando.")
-            decision_final = True
-        else:
-            print(f"      [X] ELIMINADO. PDF dice {metros_pdf}m2 (Insuficiente).")
-            try: os.remove(nuevo) # Borramos el archivo temporal
+        m_pdf = escanear_pdf_en_busca_de_metros(nuevo)
+        if m_pdf >= MIN_METROS_SEGURO: 
+            print(f"      [OK] PDF confirma {m_pdf}m2. Guardando.")
+            decision = True
+        else: 
+            print(f"      [X] Eliminado (PDF dice {m_pdf}m2)")
+            try: os.remove(nuevo)
             except: pass
-            return False # No se guardó
+            return False
 
-    if decision_final:
+    if decision:
         if not os.path.exists(carpeta_destino): os.makedirs(carpeta_destino)
-        destino = os.path.join(carpeta_destino, nombre_base)
-        try:
-            if os.path.exists(destino): os.remove(destino)
-            shutil.move(nuevo, destino)
-            return True
-        except: return False
-        
+        shutil.move(nuevo, os.path.join(carpeta_destino, os.path.basename(nuevo)))
+        return True
     return False
 
 def arreglar_url_drive(url):
@@ -171,104 +165,93 @@ def arreglar_url_drive(url):
         return f"https://drive.google.com/uc?export=download&id={match_id.group(1)}"
     return url
 
-def descargar_pdf_por_url(url, carpeta_destino, cookies_selenium, metros_web=0.0):
+def descargar_pdf_por_url(url, carpeta, cookies, m_web=0.0):
     print(f"         [PLAN B] Descargando URL directa...")
     url_final = url
     if "drive.google.com" in url: url_final = arreglar_url_drive(url)
 
     try:
-        session = requests.Session()
+        s = requests.Session()
         if "drive.google" not in url_final:
-            for cookie in cookies_selenium: session.cookies.set(cookie['name'], cookie['value'])
+            for c in cookies: s.cookies.set(c['name'], c['value'])
         
-        response = session.get(url_final, stream=True, verify=False)
+        r = s.get(url_final, stream=True, verify=False)
         
-        # Guardamos temporalmente para analizar
-        nombre_temp = "temp_analisis.pdf"
-        if "Content-Disposition" in response.headers:
-            fname = re.findall("filename=(.+)", response.headers["Content-Disposition"])
-            if fname: nombre_temp = fname[0].strip('"')
-        if not nombre_temp.lower().endswith(".pdf"): nombre_temp += ".pdf"
+        # Check content type
+        content_type = r.headers.get('Content-Type', '').lower()
+        if 'text/html' in content_type and "drive.google" not in url_final:
+            return False
 
-        ruta_temp = os.path.join(TEMP_DOWNLOAD_DIR, nombre_temp)
+        name = "doc.pdf"
+        if "filename=" in r.headers.get("Content-Disposition", ""):
+            name = re.findall("filename=(.+)", r.headers["Content-Disposition"])[0].strip('"')
+        if not name.lower().endswith(".pdf"): name += ".pdf"
         
-        with open(ruta_temp, 'wb') as f:
-            for chunk in response.iter_content(chunk_size=8192): f.write(chunk)
+        with open(os.path.join(TEMP_DOWNLOAD_DIR, name), 'wb') as f:
+            for c in r.iter_content(8192): f.write(c)
             
-        # Llamamos a la lógica de decisión pasando la ruta temporal
-        return procesar_archivo_descargado(carpeta_destino, metros_web)
-
+        return procesar_archivo_descargado(carpeta, m_web)
     except: return False
 
+def mover_archivo(carpeta_destino):
+    return procesar_archivo_descargado(carpeta_destino, 200.0) 
+
+# ==========================================
+# NAVEGACIÓN
+# ==========================================
 def click_js(driver, elemento):
     driver.execute_script("arguments[0].scrollIntoView();", elemento)
     time.sleep(0.5)
     driver.execute_script("arguments[0].click();", elemento)
 
-def volver_atras(driver):
-    try:
-        migas = driver.find_elements(By.CSS_SELECTOR, ".ui-breadcrumb a")
-        if len(migas) >= 2:
-            click_js(driver, migas[-2]); time.sleep(4); return
-    except: pass
-    driver.back(); time.sleep(4)
+def obtener_texto_seguro(elemento):
+    try: return elemento.get_attribute("textContent").strip()
+    except: return ""
 
-def volver_seguro_al_anio(driver, anio_texto):
-    print(f"    << Volviendo a carpeta '{anio_texto}'...")
-    try:
-        xpath_anio = f"//a[contains(text(), '{anio_texto}')]"
-        link_anio = WebDriverWait(driver, 5).until(EC.element_to_be_clickable((By.XPATH, xpath_anio)))
-        click_js(driver, link_anio); time.sleep(5); return True
-    except:
-        driver.back(); time.sleep(5); return True
-
-# ==========================================
-# NAVEGACIÓN INTELIGENTE
-# ==========================================
-
-def analizar_carpeta(texto_link):
-    texto = texto_link.lower()
-    if len(texto) > 100: return False, "Muy largo"
+def es_carpeta_valida(texto):
+    texto = texto.lower()
+    if len(texto) > 100: return False
     for ban in CARPETAS_IGNORAR:
-        if ban in texto: return False, f"Palabra prohibida: {ban}"
-    return True, "OK"
+        if ban in texto: return False
+    return True
 
 def obtener_puntaje_carpeta(nombre_carpeta):
     nombre = nombre_carpeta.lower()
-    if "2024" in nombre or "2025" in nombre: return 200 
+    if "2024" in nombre or "2025" in nombre: return 200
     if "permisos de obras" in nombre: return 100
-    if "permisos de edificación" in nombre: return 90
-    if "edificación" in nombre: return 80
-    if "dirección de obras" in nombre: return 70
-    if "obras municipales" in nombre: return 60
+    if "dirección de obras" in nombre: return 90 
+    if "obras municipales" in nombre: return 80
+    if "edificación" in nombre: return 70
     return 10
 
 def buscar_ruta_hacia_anio(driver, anio_objetivo, profundidad=0, visitados=None):
     if profundidad > 3: return False 
     if visitados is None: visitados = set()
 
+    # 1. Buscar AÑO
+    try:
+        xpath_anio = f"//a[contains(text(), '{anio_objetivo}')]"
+        links_anio = driver.find_elements(By.XPATH, xpath_anio)
+        for l in links_anio:
+            if l.is_displayed() and es_carpeta_valida(obtener_texto_seguro(l)):
+                txt = obtener_texto_seguro(l)
+                if len(txt) < 25 or "año" in txt.lower() or "permiso" in txt.lower():
+                    print(f"  🎯 ¡AÑO {anio_objetivo} ENCONTRADO!: {txt}")
+                    click_js(driver, l); time.sleep(3); return True
+    except: pass
+
+    # 2. Buscar Carpetas Pista
     links = driver.find_elements(By.TAG_NAME, "a")
     candidatos = []
     
     for l in links:
         try:
             if not l.is_displayed(): continue
-            txt = l.text.strip()
+            txt = obtener_texto_seguro(l)
             if not txt or txt in visitados: continue
-            
-            es_valida, razon = analizar_carpeta(txt)
-            if not es_valida: continue
-
+            if not es_carpeta_valida(txt): continue
             txt_lower = txt.lower()
-            
-            if anio_objetivo in txt:
-                if len(txt) < 10 or any(p in txt_lower for p in CARPETAS_PISTA):
-                    print(f"  🎯 ¡AÑO DETECTADO!: {txt}")
-                    click_js(driver, l)
-                    time.sleep(3)
-                    return True
-
-            if any(pista in txt_lower for pista in CARPETAS_PISTA):
+            if any(p in txt_lower for p in CARPETAS_PISTA):
                 candidatos.append(txt)
         except: pass
     
@@ -280,131 +263,106 @@ def buscar_ruta_hacia_anio(driver, anio_objetivo, profundidad=0, visitados=None)
     for carpeta in candidatos:
         print(f"  🔎 (Nivel {profundidad}) Probando: {carpeta}...")
         visitados.add(carpeta)
-        
         try:
-            elem = WebDriverWait(driver, 5).until(EC.element_to_be_clickable((By.PARTIAL_LINK_TEXT, carpeta)))
-            click_js(driver, elem)
-            time.sleep(3)
-            if buscar_ruta_hacia_anio(driver, anio_objetivo, profundidad + 1, visitados):
-                return True 
-            print(f"  ↩️ Volviendo de {carpeta}...")
-            volver_atras(driver)
-        except Exception as e:
-            try: 
-                if "no such element" not in str(e): volver_atras(driver) 
-            except: pass
+            xpath_carpeta = f"//a[contains(text(), '{carpeta}')]"
+            elems = driver.find_elements(By.XPATH, xpath_carpeta)
+            clickeado = False
+            for e in elems:
+                if e.is_displayed():
+                    click_js(driver, e); clickeado = True; break
+            if not clickeado: continue
 
+            time.sleep(3)
+            if buscar_ruta_hacia_anio(driver, anio_objetivo, profundidad + 1, visitados): return True 
+            
+            print(f"  ↩️ Volviendo de {carpeta}...")
+            driver.back(); time.sleep(4)
+        except:
+            try: driver.back(); time.sleep(4)
+            except: pass
     return False
 
-# ==========================================
-# PROCESAMIENTO
-# ==========================================
+def volver_seguro_al_anio(driver, anio_texto):
+    print(f"    << Volviendo a carpeta '{anio_texto}'...")
+    try:
+        xpath_anio = f"//a[contains(text(), '{anio_texto}')]"
+        link_anio = WebDriverWait(driver, 5).until(EC.element_to_be_clickable((By.XPATH, xpath_anio)))
+        click_js(driver, link_anio); time.sleep(5); return True
+    except:
+        driver.back(); time.sleep(5); return True
 
+# ==========================================
+# ANÁLISIS CONTENIDO
+# ==========================================
 def analizar_tabla_final(driver, nombre_comuna, anio, mes):
     try: WebDriverWait(driver, 3).until(EC.presence_of_element_located((By.TAG_NAME, "tr")))
     except: return 0 
-
     filas = driver.find_elements(By.TAG_NAME, "tr")
     descargas = 0
-    ventana_principal = driver.current_window_handle
-    ventanas_antes = driver.window_handles
-    
     print(f"      -> Escaneando {len(filas)} filas...")
-    
     for fila in filas:
         try:
             txt = limpiar_texto(fila.text)
-            metros_web = extraer_metros(txt)
+            m_web = extraer_metros(txt)
+            if m_web < MIN_METROS_DUDOSO: continue 
+            if not any(k in txt for k in KEYWORDS): continue
             
-            # --- FILTRO NIVEL 1: WEB ---
-            # Si dice menos de 100, ignoramos.
-            if metros_web < MIN_METROS_DUDOSO: 
-                continue
-            
-            # Si pasa, revisamos palabras clave
-            if not any(k in txt for k in KEYWORDS): 
-                continue
-            
-            print(f"      ★ CANDIDATO: {metros_web} m2 (En descripción)")
-            ruta_destino = os.path.join(BASE_DIR, nombre_comuna, anio, mes)
-            
-            try: link = fila.find_element(By.PARTIAL_LINK_TEXT, "Enlace")
-            except:
-                try: link = fila.find_element(By.PARTIAL_LINK_TEXT, "Ver")
-                except: 
-                    links_row = fila.find_elements(By.TAG_NAME, "a")
-                    if links_row: link = links_row[-1]
-                    else: continue
-
-            click_js(driver, link)
-            time.sleep(3)
-            
-            ventanas_ahora = driver.window_handles
-            if len(ventanas_ahora) > len(ventanas_antes):
-                new_win = [v for v in ventanas_ahora if v not in ventanas_antes][0]
-                driver.switch_to.window(new_win)
-                # PLAN B + ESCANEO PDF
-                if descargar_pdf_por_url(driver.current_url, ruta_destino, driver.get_cookies(), metros_web): 
-                    descargas += 1
-                driver.close(); driver.switch_to.window(ventana_principal)
-            elif driver.current_url.endswith(".pdf"):
-                descargar_pdf_por_url(driver.current_url, ruta_destino, driver.get_cookies(), metros_web)
-                driver.back()
-            else:
-                # DESCARGA NORMAL + ESCANEO PDF
-                for _ in range(5):
-                    # Pasamos metros_web para que la función sepa si debe escanear o no
-                    if procesar_archivo_descargado(ruta_destino, metros_web): 
-                        descargas += 1; break
-                    time.sleep(1)
-        except: 
-            if len(driver.window_handles) > len(ventanas_antes):
-                driver.close(); driver.switch_to.window(ventana_principal)
-            continue
+            print(f"      ★ CANDIDATO: {m_web} m2 (Web)")
+            ruta = os.path.join(BASE_DIR, nombre_comuna, anio, mes)
+            try: 
+                l = fila.find_element(By.PARTIAL_LINK_TEXT, "Enlace")
+                click_js(driver, l); time.sleep(3)
+                if len(driver.window_handles) > 1:
+                    driver.switch_to.window(driver.window_handles[-1])
+                    descargar_pdf_por_url(driver.current_url, ruta, driver.get_cookies(), m_web)
+                    driver.close(); driver.switch_to.window(driver.window_handles[0])
+                else:
+                    if driver.current_url.endswith(".pdf"):
+                        descargar_pdf_por_url(driver.current_url, ruta, driver.get_cookies(), m_web)
+                        driver.back()
+                    else:
+                        for _ in range(5):
+                            if procesar_archivo_descargado(ruta, m_web): descargas+=1; break
+                            time.sleep(1)
+            except: pass
+        except: pass
     return descargas
 
 def procesar_contenido_del_mes(driver, nombre_comuna, anio, mes):
     if driver.current_url.endswith(".pdf") or "drive.google" in driver.current_url:
-        print("      ⚠️ PDF/Drive Directo detectado.")
         ruta = os.path.join(BASE_DIR, nombre_comuna, anio, mes)
-        # Asumimos 100m2 para forzar el escaneo interno
         descargar_pdf_por_url(driver.current_url, ruta, driver.get_cookies(), 100.0)
         driver.back(); return 1
-
-    filas = len(driver.find_elements(By.TAG_NAME, "tr"))
-    total = 0
-    
-    if filas > 3:
-        total += analizar_tabla_final(driver, nombre_comuna, anio, mes)
-    else:
-        sub_interes = ["edificación", "regularización", "obra menor", "permiso"]
-        links = driver.find_elements(By.TAG_NAME, "a")
-        candidatos = set()
-        for l in links:
-            try:
-                if l.is_displayed():
-                    txt = l.text.strip()
-                    es_val, _ = analizar_carpeta(txt)
-                    if es_val and any(k in txt.lower() for k in sub_interes):
-                        candidatos.add(txt)
-            except: pass
         
-        for sub in sorted(list(candidatos)):
-            print(f"      -> Subcarpeta: {sub}")
-            try:
-                elem = WebDriverWait(driver, 5).until(EC.element_to_be_clickable((By.PARTIAL_LINK_TEXT, sub)))
-                click_js(driver, elem)
-                time.sleep(3)
-                if driver.current_url.endswith(".pdf"):
-                    descargar_pdf_por_url(driver.current_url, os.path.join(BASE_DIR, nombre_comuna, anio, mes), driver.get_cookies(), 100.0)
-                    driver.back()
-                else:
-                    total += analizar_tabla_final(driver, nombre_comuna, anio, mes)
-                    volver_atras(driver)
-            except: volver_atras(driver)
+    if len(driver.find_elements(By.TAG_NAME, "tr")) > 3:
+        return analizar_tabla_final(driver, nombre_comuna, anio, mes)
+    
+    print("      (Buscando subcarpetas...)")
+    subs = ["edificación", "regularización", "obra menor", "permiso"]
+    links = driver.find_elements(By.TAG_NAME, "a")
+    candidatos = set()
+    for l in links:
+        if l.is_displayed() and es_carpeta_valida(obtener_texto_seguro(l)):
+            if any(k in obtener_texto_seguro(l).lower() for k in subs): candidatos.add(obtener_texto_seguro(l))
             
-    return total
+    for sub in sorted(list(candidatos)):
+        print(f"      -> Subcarpeta: {sub}")
+        try:
+            xp = f"//a[contains(text(), '{sub}')]"
+            clk = driver.find_element(By.XPATH, xp)
+            click_js(driver, clk); time.sleep(3)
+            if driver.current_url.endswith(".pdf"):
+                descargar_pdf_por_url(driver.current_url, os.path.join(BASE_DIR, nombre_comuna, anio, mes), driver.get_cookies(), 100.0)
+                driver.back()
+            else:
+                analizar_tabla_final(driver, nombre_comuna, anio, mes)
+                driver.back(); time.sleep(3)
+        except: driver.back(); time.sleep(3)
+    return 0
 
+# ==========================================
+# FLUJO PRINCIPAL
+# ==========================================
 def procesar_comuna(driver, nombre_comuna):
     print(f"\n{'='*40}\n PROCESANDO: {nombre_comuna}\n{'='*40}")
     wait = WebDriverWait(driver, 15)
@@ -456,18 +414,17 @@ def procesar_comuna(driver, nombre_comuna):
                         print(f"    📂 {mes}...")
                         click_js(driver, l_mes); time.sleep(3)
                         total_comuna += procesar_contenido_del_mes(driver, nombre_comuna, anio, mes)
-                        if not volver_seguro_al_anio(driver, anio): volver_atras(driver)
+                        try: 
+                            xp_back_anio = f"//a[contains(text(), '{anio}')]"
+                            clk_back = driver.find_element(By.XPATH, xp_back_anio)
+                            click_js(driver, clk_back); time.sleep(4)
+                        except: driver.back(); time.sleep(4)
                 
-                print("    🔄 Reiniciando a Punto 7...")
+                print("    🔄 Reiniciando...")
                 try:
                     xp7 = "//a[contains(text(), 'Efectos sobre Terceros')]"
                     driver.find_element(By.XPATH, xp7).click()
-                except:
-                    for _ in range(3):
-                        try: 
-                            if len(driver.find_elements(By.PARTIAL_LINK_TEXT, "Dirección de Obras")) > 0: break
-                            driver.back(); time.sleep(2)
-                        except: pass
+                except: driver.get(driver.current_url)
                 time.sleep(3)
             else:
                 print(f"    ❌ No se encontró el Año {anio}.")
@@ -482,7 +439,7 @@ def procesar_comuna(driver, nombre_comuna):
 
 def main():
     driver = configurar_driver()
-    print("--- ROBOT V21: EL ANALISTA DE PDF ---")
+    print("--- ROBOT V27: HUECHURABA OK + SILENCIO ---")
     for c in COMUNAS: procesar_comuna(driver, c)
     driver.quit()
 
