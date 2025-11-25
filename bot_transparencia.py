@@ -29,16 +29,16 @@ COMUNAS = [
 KEYWORDS = ["ampliación", "remodelación", "modificación", "obra nueva", "regularización", "edificación", "obra menor"]
 MIN_METROS = 200.0
 
-# Palabras clave para identificar carpetas prometedoras
+# Filtros de Carpetas (Donde buscar el año)
 CARPETAS_PISTA = ["obras", "edificación", "urban", "permiso", "dom", "construc"]
 
-# Lista Negra ESTRICTA (Incluimos el inicio del título largo)
+# Lista Negra ESTRICTA
 CARPETAS_IGNORAR = [
     "ley 20.898", "20.898", "cuentas", "loteo", "subdivisión", 
     "copropiedad", "certificados", "recepción", "anteproyecto", 
     "paralización", "demolición", "convenio", "decreto", "nómina", 
     "contrato", "adjudicación", "sistema", "actas", "sumarios",
-    "07.", "actos y resoluciones" # <--- ESTO CORTA EL BUCLE DE CERRILOS
+    "07.", "actos y resoluciones"
 ]
 
 TEMP_DOWNLOAD_DIR = os.path.join(BASE_DIR, "Temp_Descargas")
@@ -116,44 +116,45 @@ def click_js(driver, elemento):
     driver.execute_script("arguments[0].click();", elemento)
 
 def volver_atras(driver):
-    """Intenta volver atrás evitando el bucle del navegador."""
     try:
-        # Intentamos buscar una miga de pan que NO sea la actual
         migas = driver.find_elements(By.CSS_SELECTOR, ".ui-breadcrumb a")
         if len(migas) >= 2:
-            # Clic en el nivel superior (penúltimo link)
             click_js(driver, migas[-2])
             time.sleep(4)
             return
     except: pass
-    
     driver.back()
     time.sleep(4)
 
 # ==========================================
-# NAVEGACIÓN "SABUESO" V15 (ANTI-BUCLE)
+# NAVEGACIÓN INTELIGENTE V16 (PRIORIDAD)
 # ==========================================
 
 def es_carpeta_valida(texto):
     texto = texto.lower()
-    
-    # 1. Filtro de longitud (Los títulos de sección son muy largos)
     if len(texto) > 80: return False 
-
-    # 2. Filtro de palabras prohibidas
     for ban in CARPETAS_IGNORAR:
         if ban in texto: return False
-        
     return True
 
+def obtener_puntaje_carpeta(nombre_carpeta):
+    """
+    Asigna puntaje para ordenar carpetas. 
+    Queremos que entre PRIMERO a 'Permisos de Obras'.
+    """
+    nombre = nombre_carpeta.lower()
+    if "permisos de obras" in nombre: return 100 # Máxima prioridad
+    if "permisos de edificación" in nombre: return 90
+    if "edificación" in nombre: return 80
+    if "dirección de obras" in nombre: return 70
+    if "obras municipales" in nombre: return 60
+    return 10 # Prioridad baja (ej: Modificación, Urbanización)
+
 def buscar_ruta_hacia_anio(driver, anio_objetivo, profundidad=0, visitados=None):
-    """
-    Función RECURSIVA con MEMORIA (visited).
-    """
     if profundidad > 3: return False 
     if visitados is None: visitados = set()
 
-    # 1. Buscar AÑO directamente
+    # 1. Buscar AÑO
     links = driver.find_elements(By.TAG_NAME, "a")
     for l in links:
         try:
@@ -165,7 +166,7 @@ def buscar_ruta_hacia_anio(driver, anio_objetivo, profundidad=0, visitados=None)
                     return True
         except: pass
 
-    # 2. Recopilar carpetas pista (evitando las ya visitadas en esta rama)
+    # 2. Recopilar carpetas pista
     candidatos = []
     links = driver.find_elements(By.TAG_NAME, "a")
     
@@ -174,36 +175,28 @@ def buscar_ruta_hacia_anio(driver, anio_objetivo, profundidad=0, visitados=None)
             if l.is_displayed():
                 txt = l.text.strip()
                 if not txt: continue
-                
-                # CLAVE: Si ya visitamos este nombre exacto, lo saltamos para evitar bucles
                 if txt in visitados: continue
                 
-                # Chequeo: Contiene palabra pista Y es válida
                 if any(pista in txt.lower() for pista in CARPETAS_PISTA) and es_carpeta_valida(txt):
                     candidatos.append(txt)
         except: pass
     
-    # Deduplicar lista
-    candidatos = sorted(list(set(candidatos)))
+    # Deduplicar y ORDENAR POR PRIORIDAD
+    candidatos = sorted(list(set(candidatos)), key=obtener_puntaje_carpeta, reverse=True)
     
     if profundidad == 0:
-        print(f"  👀 Veo estas carpetas posibles: {candidatos}")
+        print(f"  👀 Carpetas posibles (Ordenadas por prioridad): {candidatos}")
 
-    # 3. Explorar candidatos
+    # 3. Explorar
     for carpeta in candidatos:
         print(f"  🔎 (Nivel {profundidad}) Entrando a: {carpeta}...")
-        
-        # Añadimos a visitados para no volver a entrar en la recursión
         visitados.add(carpeta)
         
         try:
-            # Re-buscamos el elemento
             elem = WebDriverWait(driver, 5).until(EC.element_to_be_clickable((By.PARTIAL_LINK_TEXT, carpeta)))
             click_js(driver, elem)
             time.sleep(3)
             
-            # RECURSIÓN: Buscar el año aquí adentro
-            # Pasamos 'visitados' para que la memoria se mantenga
             if buscar_ruta_hacia_anio(driver, anio_objetivo, profundidad + 1, visitados):
                 return True 
             
@@ -211,11 +204,9 @@ def buscar_ruta_hacia_anio(driver, anio_objetivo, profundidad=0, visitados=None)
             volver_atras(driver)
             
         except Exception as e:
-            print(f"     Error/Salto en {carpeta}: {e}")
-            # Si falló el clic o la carga, intentamos volver por seguridad
+            print(f"     Salto {carpeta}: {e}")
             try: 
-                if "no such element" not in str(e): # Solo si realmente navegó
-                    volver_atras(driver) 
+                if "no such element" not in str(e): volver_atras(driver) 
             except: pass
 
     return False
@@ -242,7 +233,7 @@ def analizar_tabla_final(driver, nombre_comuna, anio, mes):
             if metros < MIN_METROS: continue
             if not any(k in txt for k in KEYWORDS): continue
             
-            print(f"      ★ CANDIDATO: {metros} m2")
+            print(f"      ★ CANDIDATO: {metros} m2 | {txt[:40]}...")
             ruta_destino = os.path.join(BASE_DIR, nombre_comuna, anio, mes)
             
             try: link = fila.find_element(By.PARTIAL_LINK_TEXT, "Enlace")
@@ -276,7 +267,6 @@ def analizar_tabla_final(driver, nombre_comuna, anio, mes):
     return descargas
 
 def procesar_contenido_del_mes(driver, nombre_comuna, anio, mes):
-    # 1. PDF Directo
     if driver.current_url.endswith(".pdf") or "drive.google" in driver.current_url:
         print("      ⚠️ PDF/Drive Directo detectado.")
         ruta = os.path.join(BASE_DIR, nombre_comuna, anio, mes)
@@ -284,21 +274,18 @@ def procesar_contenido_del_mes(driver, nombre_comuna, anio, mes):
             descargar_pdf_por_url(driver.current_url, ruta, driver.get_cookies(), f"Doc_{mes}.pdf")
         driver.back(); return 1
 
-    # 2. Tabla o Subcarpetas
     filas = len(driver.find_elements(By.TAG_NAME, "tr"))
     total = 0
     
     if filas > 3:
         total += analizar_tabla_final(driver, nombre_comuna, anio, mes)
     else:
-        # Subcarpetas
         sub_interes = ["edificación", "regularización", "obra menor", "permiso"]
         links = driver.find_elements(By.TAG_NAME, "a")
         candidatos = set()
         for l in links:
             try:
                 if l.is_displayed() and es_carpeta_valida(l.text):
-                    # Evitamos entrar al "07. Actos..." en los meses también
                     if any(k in l.text.lower() for k in sub_interes):
                         candidatos.add(l.text)
             except: pass
@@ -325,7 +312,6 @@ def procesar_comuna(driver, nombre_comuna):
     main_win = driver.current_window_handle
     
     try:
-        # 1. Inicio
         driver.get("https://www.portaltransparencia.cl/")
         time.sleep(2)
         try:
@@ -355,8 +341,6 @@ def procesar_comuna(driver, nombre_comuna):
         total_comuna = 0
         for anio in ["2024", "2025"]:
             print(f"--- Buscando Año {anio} ---")
-            
-            # Buscamos ruta con MEMORIA (set vacío al iniciar cada año)
             encontrado = buscar_ruta_hacia_anio(driver, anio, profundidad=0, visitados=set())
             
             if encontrado:
@@ -377,7 +361,6 @@ def procesar_comuna(driver, nombre_comuna):
                 
                 print("    🔄 Reiniciando a Punto 7 para siguiente año...")
                 try:
-                    # Volver al inicio absoluto de Point 7 para evitar confusión en la siguiente búsqueda
                     xp7 = "//a[contains(text(), 'Efectos sobre Terceros')]"
                     driver.find_element(By.XPATH, xp7).click()
                 except:
@@ -400,7 +383,7 @@ def procesar_comuna(driver, nombre_comuna):
 
 def main():
     driver = configurar_driver()
-    print("--- ROBOT V15: ANTI-BUCLE Y MEMORIA ---")
+    print("--- ROBOT V16: PRIORIDAD INTELIGENTE ---")
     for c in COMUNAS: procesar_comuna(driver, c)
     driver.quit()
 
