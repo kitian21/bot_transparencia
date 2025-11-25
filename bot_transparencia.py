@@ -18,30 +18,37 @@ from webdriver_manager.chrome import ChromeDriverManager
 BASE_DIR = r"C:\Users\In Data\OneDrive\Escritorio\christian\200mts o mas"
 
 COMUNAS = [
-    #"Cerrillos", "Cerro Navia", "Conchalí", "El Bosque", "Estación Central", 
-    "Huechuraba",
-    #"Independencia", "La Cisterna", "La Florida", "La Granja", 
-    #"La Pintana", "La Reina", "Las Condes", "Lo Barnechea", "Lo Espejo", 
-    #"Lo Prado", "Macul", "Maipú", "Ñuñoa", "Pedro Aguirre Cerda", "Peñalolén", 
-    #"Providencia", "Pudahuel", "Quilicura", "Quinta Normal", "Recoleta", 
-    #"Renca", "San Joaquín", "San Miguel", "San Ramón", "Santiago", "Vitacura"
+    "Cerrillos", "Cerro Navia", "Conchalí", "El Bosque", "Estación Central", 
+    "Huechuraba", "Independencia", "La Cisterna", "La Florida", "La Granja", 
+    "La Pintana", "La Reina", "Las Condes", "Lo Barnechea", "Lo Espejo", 
+    "Lo Prado", "Macul", "Maipú", "Ñuñoa", "Pedro Aguirre Cerda", "Peñalolén", 
+    "Providencia", "Pudahuel", "Quilicura", "Quinta Normal", "Recoleta", 
+    "Renca", "San Joaquín", "San Miguel", "San Ramón", "Santiago", "Vitacura"
 ]
 
+# Filtros de Archivos (Lo que queremos descargar)
 KEYWORDS = ["ampliación", "remodelación", "modificación", "obra nueva", "regularización", "edificación", "obra menor"]
 MIN_METROS = 200.0
 
-# Lista negra de carpetas
+# Filtros de Carpetas (Donde buscar el año)
+# Buscaremos carpetas que contengan estas palabras para hallar el año dentro
+CARPETAS_PISTA = ["obras", "edificación", "urban", "permiso", "dom", "construc"]
+
+# Lista Negra (Donde NO entrar jamás)
 CARPETAS_IGNORAR = [
-    "Urbanización", "Ley 20.898", "20.898", "Cuentas", "Loteo", 
-    "Subdivisión", "Copropiedad", "Certificados", "Recepción", 
-    "Anteproyecto", "Paralización", "Demolición",
-    "Convenio", "Decreto", "Nómina", "Contrato", "Adjudicación", "Sistema"
+    "ley 20.898", "20.898", "cuentas", "loteo", "subdivisión", 
+    "copropiedad", "recepción", "anteproyecto", 
+    "paralización", "demolición", "convenio", "decreto", "nómina", 
+    "contrato", "adjudicación", "sistema", "actas", "sumarios", "informe",
+    "resolución", "plan regulador", "reglamento", "ordenanza", "catastro",
+    "catastral", "patrimonial", "arbolado", "ambiental", "sanitario",
+    "salud", "vialidad", "tránsito", "transito", "estadística", "estadistica"
 ]
 
 TEMP_DOWNLOAD_DIR = os.path.join(BASE_DIR, "Temp_Descargas")
 
 # ==========================================
-# HERRAMIENTAS BÁSICAS
+# HERRAMIENTAS
 # ==========================================
 def configurar_driver():
     if not os.path.exists(TEMP_DOWNLOAD_DIR): os.makedirs(TEMP_DOWNLOAD_DIR)
@@ -80,7 +87,6 @@ def mover_archivo(carpeta_destino):
     
     nombre_base = os.path.basename(nuevo)
     destino = os.path.join(carpeta_destino, nombre_base)
-    
     try:
         if os.path.exists(destino): os.remove(destino)
         shutil.move(nuevo, destino)
@@ -89,15 +95,14 @@ def mover_archivo(carpeta_destino):
     except: return False
 
 def descargar_pdf_por_url(url, carpeta_destino, cookies_selenium, nombre_sugerido="documento.pdf"):
-    print(f"         [PLAN B] Descargando URL directa...")
+    print(f"         [PLAN B] Descarga directa URL...")
     try:
         if not os.path.exists(carpeta_destino): os.makedirs(carpeta_destino)
         session = requests.Session()
         for cookie in cookies_selenium:
             session.cookies.set(cookie['name'], cookie['value'])
-            
-        response = session.get(url, stream=True, verify=False)
         
+        response = session.get(url, stream=True, verify=False)
         nombre_archivo = nombre_sugerido
         if "Content-Disposition" in response.headers:
             fname = re.findall("filename=(.+)", response.headers["Content-Disposition"])
@@ -109,118 +114,125 @@ def descargar_pdf_por_url(url, carpeta_destino, cookies_selenium, nombre_sugerid
                 f.write(chunk)
         print(f"      [DESCARGA OK - DIRECTO] {nombre_archivo}")
         return True
-    except Exception as e:
-        print(f"      [ERROR PLAN B] {e}")
-        return False
+    except: return False
 
 def click_js(driver, elemento):
-    try:
-        driver.execute_script("arguments[0].scrollIntoView();", elemento)
-        time.sleep(0.5)
-        driver.execute_script("arguments[0].click();", elemento)
-    except: pass
+    driver.execute_script("arguments[0].scrollIntoView();", elemento)
+    time.sleep(0.5)
+    driver.execute_script("arguments[0].click();", elemento)
 
-def es_enlace_valido(texto_enlace):
-    for prohibida in CARPETAS_IGNORAR:
-        if prohibida.lower() in texto_enlace.lower():
-            return False
+def volver_atras(driver):
+    """Intenta volver atrás de forma inteligente."""
+    try:
+        # Intenta buscar migas de pan genéricas (cualquier enlace en el header azul)
+        migas = driver.find_elements(By.CSS_SELECTOR, ".ui-breadcrumb a")
+        if len(migas) > 1:
+            # Clic en el penúltimo (el nivel anterior al actual)
+            click_js(driver, migas[-2])
+            time.sleep(4)
+            return
+    except: pass
+    
+    # Si falla, usa navegador
+    driver.back()
+    time.sleep(4)
+
+# ==========================================
+# NAVEGACIÓN "SABUESO" (BUSCADOR DE AÑO)
+# ==========================================
+
+def es_carpeta_valida(texto):
+    texto = texto.lower()
+    for ban in CARPETAS_IGNORAR:
+        if ban in texto: return False
     return True
 
-# ==========================================
-# LÓGICA DE RECUPERACIÓN (NUEVO)
-# ==========================================
-
-def restaurar_ruta_si_es_necesario(driver, anio_objetivo):
+def buscar_ruta_hacia_anio(driver, anio_objetivo, profundidad=0):
     """
-    Verifica si estamos en la carpeta del año. Si no (porque el back nos sacó),
-    vuelve a entrar desde el principio (DOM -> Permisos -> Año).
+    Función RECURSIVA que busca el año.
+    1. ¿Está el año aquí? -> Entra y retorna True.
+    2. Si no, ¿Hay carpetas prometedoras (Obras, Permisos)? -> Entra, busca adentro, y si no está, vuelve y prueba la siguiente.
     """
-    # 1. Verificar si vemos los meses (Señal de que estamos bien)
-    try:
-        # Buscamos si "Enero" o "Marzo" están visibles
-        if len(driver.find_elements(By.PARTIAL_LINK_TEXT, "Enero")) > 0 or \
-           len(driver.find_elements(By.PARTIAL_LINK_TEXT, "Marzo")) > 0:
-            return True # Estamos bien
-    except: pass
+    if profundidad > 2: return False # No bajar más de 2 niveles para no perderse
 
-    print("    ⚠️ ¡ALERTA! Parece que me salí de la carpeta del año. RECONECTANDO...")
-    time.sleep(2)
-
-    # 2. Si estamos perdidos (en Point 7), reingresamos
-    # Paso A: Dirección de Obras
-    nombres_dom = ["Dirección de Obras", "Obras Municipales", "Urbanización"]
-    encontrado_dom = False
+    # 1. Buscar AÑO directamente
     links = driver.find_elements(By.TAG_NAME, "a")
     for l in links:
         try:
-            if l.is_displayed() and any(n in l.text for n in nombres_dom):
-                click_js(driver, l)
-                encontrado_dom = True
-                time.sleep(3)
-                break
-        except: pass
-    
-    # Paso B: Permisos
-    nombres_permisos = ["Permisos de Obras", "Permisos de Edificación", "Edificación"]
-    links = driver.find_elements(By.TAG_NAME, "a")
-    for l in links:
-        try:
-            if l.is_displayed():
-                txt = l.text.strip()
-                if any(n in txt for n in nombres_permisos) and es_enlace_valido(txt):
+            if l.is_displayed() and anio_objetivo in l.text:
+                # Validar que no sea un Convenio falso
+                if es_carpeta_valida(l.text) and len(l.text) < 25:
+                    print(f"  🎯 ¡AÑO {anio_objetivo} ENCONTRADO!: {l.text}")
                     click_js(driver, l)
                     time.sleep(3)
-                    break
-        except: pass
-
-    # Paso C: Año
-    links = driver.find_elements(By.TAG_NAME, "a")
-    for l in links:
-        try:
-            if l.is_displayed():
-                txt = l.text.strip()
-                if anio_objetivo in txt and es_enlace_valido(txt):
-                    click_js(driver, l)
-                    time.sleep(3)
-                    print(f"    ✅ Ruta restaurada al año {anio_objetivo}.")
                     return True
         except: pass
+
+    # 2. Si no está el año, buscar CARPETAS PISTA
+    # Recopilamos candidatos para no perder referencias al navegar
+    candidatos = []
+    links = driver.find_elements(By.TAG_NAME, "a")
     
-    print("    ❌ No pude restaurar la ruta automáticamente.")
+    # Debug visual para saber qué ve el robot
+    nombres_visibles = []
+    
+    for l in links:
+        try:
+            if l.is_displayed():
+                txt = l.text.strip()
+                if not txt: continue
+                nombres_visibles.append(txt)
+                
+                # Chequeo: Contiene palabra pista Y NO está prohibida
+                if any(pista in txt.lower() for pista in CARPETAS_PISTA) and es_carpeta_valida(txt):
+                    candidatos.append(txt)
+        except: pass
+    
+    # Deduplicar
+    candidatos = sorted(list(set(candidatos)))
+    
+    if profundidad == 0:
+        print(f"  👀 Veo estas carpetas posibles: {candidatos}")
+
+    # 3. Explorar candidatos
+    for carpeta in candidatos:
+        print(f"  🔎 Explorando nivel {profundidad}: {carpeta}...")
+        
+        # Volver a encontrar el elemento (el DOM cambia al volver atrás)
+        try:
+            elem = WebDriverWait(driver, 5).until(EC.element_to_be_clickable((By.PARTIAL_LINK_TEXT, carpeta)))
+            click_js(driver, elem)
+            time.sleep(3)
+            
+            # RECURSIÓN: Buscar el año aquí adentro
+            if buscar_ruta_hacia_anio(driver, anio_objetivo, profundidad + 1):
+                return True # ¡Lo encontramos adentro!
+            
+            # Si no estaba, volver atrás y probar siguiente candidato
+            print(f"  ↩️ No estaba en {carpeta}, volviendo...")
+            volver_atras(driver)
+            
+        except Exception as e:
+            print(f"     Error entrando a {carpeta}: {e}")
+            try: volver_atras(driver) 
+            except: pass
+
     return False
 
-def volver_al_nivel_superior(driver, texto_nivel):
-    """Intenta volver con migas, si no con back."""
-    print(f"    << Intentando volver a: {texto_nivel}...")
-    try:
-        xpath_ruta = f"//a[contains(text(), '{texto_nivel}')]"
-        link_retorno = WebDriverWait(driver, 5).until(EC.element_to_be_clickable((By.XPATH, xpath_ruta)))
-        click_js(driver, link_retorno)
-        time.sleep(4) 
-        return True
-    except: 
-        print("       (Usando navegador ATRÁS)")
-        driver.back()
-        time.sleep(4)
-        return False
-
 # ==========================================
-# PROCESAMIENTO
+# PROCESAMIENTO DE ARCHIVOS (PDF/TABLAS)
 # ==========================================
 
 def analizar_tabla_final(driver, nombre_comuna, anio, mes):
-    try:
-        WebDriverWait(driver, 3).until(EC.presence_of_element_located((By.TAG_NAME, "tr")))
+    try: WebDriverWait(driver, 3).until(EC.presence_of_element_located((By.TAG_NAME, "tr")))
     except: return 0 
 
     filas = driver.find_elements(By.TAG_NAME, "tr")
     descargas = 0
-    
-    # Guardar contexto de ventana
     ventana_principal = driver.current_window_handle
     ventanas_antes = driver.window_handles
     
-    print(f"      -> Analizando {len(filas)} filas...")
+    print(f"      -> Escaneando {len(filas)} filas...")
     
     for fila in filas:
         try:
@@ -232,244 +244,173 @@ def analizar_tabla_final(driver, nombre_comuna, anio, mes):
             print(f"      ★ CANDIDATO: {metros} m2")
             ruta_destino = os.path.join(BASE_DIR, nombre_comuna, anio, mes)
             
-            # Intentar Clic
+            # Clic flexible
             try: link = fila.find_element(By.PARTIAL_LINK_TEXT, "Enlace")
             except:
                 try: link = fila.find_element(By.PARTIAL_LINK_TEXT, "Ver")
                 except: 
-                    try:
-                        links_fila = fila.find_elements(By.TAG_NAME, "a")
-                        if links_fila: link = links_fila[-1]
-                        else: continue
-                    except: continue
+                    links_row = fila.find_elements(By.TAG_NAME, "a")
+                    if links_row: link = links_row[-1]
+                    else: continue
 
             click_js(driver, link)
             time.sleep(3)
             
-            # CHEQUEO: ¿Se abrió pestaña nueva?
+            # Manejo Pestaña/PDF
             ventanas_ahora = driver.window_handles
             if len(ventanas_ahora) > len(ventanas_antes):
-                nueva_ventana = [v for v in ventanas_ahora if v not in ventanas_antes][0]
-                driver.switch_to.window(nueva_ventana)
-                
-                # Descargar PDF
-                url_pdf = driver.current_url
-                cookies = driver.get_cookies()
-                if descargar_pdf_por_url(url_pdf, ruta_destino, cookies): descargas += 1
-                
-                # Cerrar y volver
-                driver.close()
-                driver.switch_to.window(ventana_principal)
+                new_win = [v for v in ventanas_ahora if v not in ventanas_antes][0]
+                driver.switch_to.window(new_win)
+                if descargar_pdf_por_url(driver.current_url, ruta_destino, driver.get_cookies()): descargas += 1
+                driver.close(); driver.switch_to.window(ventana_principal)
+            elif driver.current_url.endswith(".pdf"):
+                descargar_pdf_por_url(driver.current_url, ruta_destino, driver.get_cookies())
+                driver.back()
             else:
-                # CHEQUEO: ¿Cambió la URL en la misma ventana (PDF directo)?
-                if driver.current_url.endswith(".pdf"):
-                    descargar_pdf_por_url(driver.current_url, ruta_destino, driver.get_cookies())
-                    driver.back() # Volver a la tabla
-                else:
-                    # Descarga normal
-                    for _ in range(5):
-                        if mover_archivo(ruta_destino):
-                            descargas += 1
-                            break
-                        time.sleep(1)
-        except Exception as e: 
-            # Recuperación de emergencia
+                for _ in range(5):
+                    if mover_archivo(ruta_destino): descargas += 1; break
+                    time.sleep(1)
+        except: 
             if len(driver.window_handles) > len(ventanas_antes):
                 driver.close(); driver.switch_to.window(ventana_principal)
             continue
     return descargas
 
 def procesar_contenido_del_mes(driver, nombre_comuna, anio, mes):
-    total_descargas = 0
-    wait = WebDriverWait(driver, 5)
-    
-    # 1. Detectar PDF Directo (Caso Huechuraba)
-    url_actual = driver.current_url.lower()
-    if url_actual.endswith(".pdf") or "drive.google" in url_actual:
-        print("      ⚠️ EL MES ES UN PDF DIRECTO.")
+    # 1. PDF Directo
+    if driver.current_url.endswith(".pdf") or "drive.google" in driver.current_url:
+        print("      ⚠️ PDF/Drive Directo detectado.")
         ruta = os.path.join(BASE_DIR, nombre_comuna, anio, mes)
-        nombre = f"Documento_{mes}_{anio}.pdf"
-        
-        if "drive.google" in url_actual:
-            print("      [!] Drive detectado (saltando).")
-        else:
-            descargar_pdf_por_url(driver.current_url, ruta, driver.get_cookies(), nombre)
-        
-        driver.back() # Volver obligatorio
-        return 1
+        if "drive.google" not in driver.current_url:
+            descargar_pdf_por_url(driver.current_url, ruta, driver.get_cookies(), f"Doc_{mes}.pdf")
+        driver.back(); return 1
 
-    # 2. Detectar Tabla
-    filas_tabla = len(driver.find_elements(By.TAG_NAME, "tr"))
+    # 2. Tabla o Subcarpetas
+    filas = len(driver.find_elements(By.TAG_NAME, "tr"))
+    total = 0
     
-    if filas_tabla > 3:
-        total_descargas += analizar_tabla_final(driver, nombre_comuna, anio, mes)
+    if filas > 3:
+        total += analizar_tabla_final(driver, nombre_comuna, anio, mes)
     else:
-        # 3. Detectar Subcarpetas
-        print("      (Buscando subcarpetas...)")
-        subcarpetas_interes = ["Permiso de Edificación", "Regularización", "Edificación", "Obra Menor"]
-        links_potenciales = driver.find_elements(By.TAG_NAME, "a")
-        nombres_validos = set() 
-        for l in links_potenciales:
-            try:
-                if l.is_displayed():
-                    texto = l.text.strip()
-                    if es_enlace_valido(texto):
-                        if any(k in texto for k in subcarpetas_interes):
-                            nombres_validos.add(texto)
-            except: pass
-        
-        lista_a_procesar = sorted(list(nombres_validos))
-        for nombre_sub in lista_a_procesar:
-            print(f"      -> Entrando a: {nombre_sub}")
-            try:
-                xpath_sub = f"//a[contains(text(), '{nombre_sub}')]"
-                link_click = wait.until(EC.element_to_be_clickable((By.XPATH, xpath_sub)))
-                click_js(driver, link_click)
-                time.sleep(3)
-                
-                total_descargas += analizar_tabla_final(driver, nombre_comuna, anio, mes)
-                volver_al_nivel_superior(driver, mes.upper())
-            except: volver_al_nivel_superior(driver, mes.upper())
-            
-    return total_descargas
-
-def procesar_anios_y_meses(driver, nombre_comuna):
-    total_comuna = 0
-    anios_target = ["2024", "2025"]
-    
-    for anio in anios_target:
-        print(f"  📂 Buscando carpeta Año {anio}...")
-        
-        # Búsqueda inteligente de año
-        encontrado_anio = False
+        # Subcarpetas
+        sub_interes = ["edificación", "regularización", "obra menor", "permiso"]
         links = driver.find_elements(By.TAG_NAME, "a")
+        candidatos = set()
         for l in links:
             try:
-                if l.is_displayed() and anio in l.text and es_enlace_valido(l.text):
-                    click_js(driver, l)
-                    encontrado_anio = True
-                    time.sleep(3)
-                    break
+                if l.is_displayed() and es_carpeta_valida(l.text):
+                    if any(k in l.text.lower() for k in sub_interes):
+                        candidatos.add(l.text)
             except: pass
         
-        if not encontrado_anio:
-            print(f"    (No encontré carpeta {anio})")
-            continue
-
-        meses_nombres = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", 
-                         "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
-        
-        for mes in meses_nombres:
-            # --- AUTO-RECUPERACIÓN ---
-            # Antes de buscar el mes, verificamos si seguimos en el año. Si no, volvemos.
-            restaurar_ruta_si_es_necesario(driver, anio)
-            
-            # Ahora sí, buscamos el mes
-            xpath_mes = f"//a[contains(translate(text(), 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), '{mes.upper()}')]"
-            elems_mes = driver.find_elements(By.XPATH, xpath_mes)
-            link_mes = None
-            for e in elems_mes:
-                if e.is_displayed(): link_mes = e; break
-            
-            if link_mes:
-                print(f"    📂 Entrando a {mes}...")
-                click_js(driver, link_mes)
+        for sub in sorted(list(candidatos)):
+            print(f"      -> Subcarpeta: {sub}")
+            try:
+                elem = WebDriverWait(driver, 5).until(EC.element_to_be_clickable((By.PARTIAL_LINK_TEXT, sub)))
+                click_js(driver, elem)
                 time.sleep(3)
-                
-                total_comuna += procesar_contenido_del_mes(driver, nombre_comuna, anio, mes)
-                
-                # Intentamos volver con migas, si falla usa back
-                if not volver_al_nivel_superior(driver, anio):
-                    # Si volver falló mucho, la siguiente iteración de 'mes' activará 'restaurar_ruta'
-                    pass
+                # Recursividad simple (solo 1 nivel más)
+                if driver.current_url.endswith(".pdf"):
+                    descargar_pdf_por_url(driver.current_url, os.path.join(BASE_DIR, nombre_comuna, anio, mes), driver.get_cookies(), f"{sub}.pdf")
+                    driver.back()
+                else:
+                    total += analizar_tabla_final(driver, nombre_comuna, anio, mes)
+                    volver_atras(driver)
+            except: volver_atras(driver)
+            
+    return total
 
-        # Salir del año
-        if not volver_al_nivel_superior(driver, "Permisos de Obras"):
-             if not volver_al_nivel_superior(driver, "Edificación"):
-                 volver_al_nivel_superior(driver, "Dirección de Obras")
-        time.sleep(2)
-
-    return total_comuna
-
-# ==========================================
-# FLUJO PRINCIPAL
-# ==========================================
 def procesar_comuna(driver, nombre_comuna):
-    print(f"\n{'='*40}")
-    print(f" PROCESANDO: {nombre_comuna}")
-    print(f"{'='*40}")
+    print(f"\n{'='*40}\n PROCESANDO: {nombre_comuna}\n{'='*40}")
     wait = WebDriverWait(driver, 15)
-    ventana_main = driver.current_window_handle
+    main_win = driver.current_window_handle
     
     try:
+        # 1. Inicio
         driver.get("https://www.portaltransparencia.cl/")
         time.sleep(2)
         try:
             s = wait.until(EC.element_to_be_clickable((By.ID, "cuadroBusqueda")))
             s.clear(); s.send_keys(f"Municipalidad de {nombre_comuna}"); time.sleep(1); s.send_keys(Keys.ENTER)
-        except: input("⚠️ HAZ BÚSQUEDA MANUAL Y ENTER...")
+        except: input("⚠️ BUSCA MANUALMENTE Y ENTER...")
 
+        # 2. Resultado
         time.sleep(3)
         try:
-            xpath = f"//p[contains(@class, 'entry-body__title') and contains(text(), '{nombre_comuna}')]"
-            res = wait.until(EC.element_to_be_clickable((By.XPATH, xpath))); click_js(driver, res)
-        except: input("⚠️ HAZ CLIC EN LA MUNI Y ENTER...")
+            xp = f"//p[contains(@class, 'entry-body__title') and contains(text(), '{nombre_comuna}')]"
+            res = wait.until(EC.element_to_be_clickable((By.XPATH, xp))); click_js(driver, res)
+        except: input("⚠️ CLIC EN LA MUNI Y ENTER...")
 
+        # 3. Pestaña
         try:
             wait.until(EC.number_of_windows_to_be(2))
             driver.switch_to.window(driver.window_handles[-1])
             time.sleep(4)
         except: pass
 
+        # 4. Punto 7
         try:
-            xpath7 = "//a[contains(text(), 'Efectos sobre Terceros') or contains(text(), 'efectos sobre terceros')]"
-            l7 = wait.until(EC.presence_of_element_located((By.XPATH, xpath7))); click_js(driver, l7)
+            xp7 = "//a[contains(text(), 'Efectos sobre Terceros') or contains(text(), 'efectos sobre terceros')]"
+            l7 = wait.until(EC.presence_of_element_located((By.XPATH, xp7))); click_js(driver, l7)
         except: input("⚠️ ENTRA AL PUNTO 7 Y ENTER...")
 
         time.sleep(3)
-        # Nivel 1 y 2 (Simplificado con búsqueda en cascada)
         
-        # Intento 1: Buscar DOM
-        encontrado = False
-        nombres_dom = ["Dirección de Obras", "Obras Municipales", "Urbanización"]
-        links = driver.find_elements(By.TAG_NAME, "a")
-        for l in links:
-            try:
-                if l.is_displayed() and any(n in l.text for n in nombres_dom):
-                    click_js(driver, l); encontrado = True; time.sleep(3); break
-            except: pass
+        # 5. BUCLE DE AÑOS (Aquí está la magia V14)
+        total_comuna = 0
+        for anio in ["2024", "2025"]:
+            print(f"--- Buscando Año {anio} ---")
             
-        # Intento 2: Buscar Permisos (dentro de DOM o directo)
-        nombres_permisos = ["Permisos de Obras", "Permisos de Edificación", "Edificación", "Urbanización"]
-        links = driver.find_elements(By.TAG_NAME, "a")
-        permiso_ok = False
-        for l in links:
-            try:
-                txt = l.text.strip()
-                if l.is_displayed() and any(n in txt for n in nombres_permisos) and es_enlace_valido(txt):
-                    click_js(driver, l); permiso_ok = True; time.sleep(3); break
-            except: pass
+            # Llamamos al sabueso
+            encontrado = buscar_ruta_hacia_anio(driver, anio, profundidad=0)
             
-        if not permiso_ok:
-            print("⚠️ No encontré carpeta 'Permisos'. Buscando Años directo...")
+            if encontrado:
+                # Procesar Meses
+                meses = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", 
+                         "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
+                for mes in meses:
+                    # Buscar mes
+                    xp_mes = f"//a[contains(translate(text(), 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), '{mes.upper()}')]"
+                    elems = driver.find_elements(By.XPATH, xp_mes)
+                    l_mes = None
+                    for e in elems:
+                        if e.is_displayed(): l_mes = e; break
+                    
+                    if l_mes:
+                        print(f"    📂 {mes}...")
+                        click_js(driver, l_mes); time.sleep(3)
+                        total_comuna += procesar_contenido_del_mes(driver, nombre_comuna, anio, mes)
+                        volver_atras(driver)
+                
+                # Volver al inicio de Punto 7 para buscar el siguiente año limpio
+                # Es más seguro reiniciar la búsqueda desde la raíz de Point 7 que tratar de subir niveles exactos
+                print("    🔄 Reiniciando a Punto 7 para siguiente año...")
+                try:
+                    xp7 = "//a[contains(text(), 'Efectos sobre Terceros')]"
+                    driver.find_element(By.XPATH, xp7).click() # Si hay breadcrumb al root
+                except:
+                    # Si no hay link directo, back() varias veces hasta ver el menú principal
+                    for _ in range(3):
+                        try: 
+                            if len(driver.find_elements(By.PARTIAL_LINK_TEXT, "Dirección de Obras")) > 0: break
+                            driver.back(); time.sleep(2)
+                        except: pass
+                time.sleep(3)
+            else:
+                print(f"    ❌ No se encontró el Año {anio} tras búsqueda profunda.")
 
-        total = procesar_anios_y_meses(driver, nombre_comuna)
-        print(f"✅ Fin {nombre_comuna}. Total: {total}")
+        print(f"✅ Fin {nombre_comuna}. Total: {total_comuna}")
 
-    except Exception as e:
-        print(f"❌ Error en {nombre_comuna}: {e}")
-    
+    except Exception as e: print(f"❌ Error {nombre_comuna}: {e}")
     finally:
         try:
-            if len(driver.window_handles) > 1:
-                driver.close(); driver.switch_to.window(ventana_main)
+            if len(driver.window_handles) > 1: driver.close(); driver.switch_to.window(main_win)
         except: pass
 
 def main():
     driver = configurar_driver()
-    print("--- ROBOT V13: AUTO-RECUPERACIÓN DE RUTA ---")
-    for c in COMUNAS:
-        procesar_comuna(driver, c)
+    print("--- ROBOT V14 UNIVERSAL: BÚSQUEDA PROFUNDA ---")
+    for c in COMUNAS: procesar_comuna(driver, c)
     driver.quit()
 
 if __name__ == "__main__":
