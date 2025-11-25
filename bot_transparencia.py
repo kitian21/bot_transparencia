@@ -29,10 +29,8 @@ COMUNAS = [
 KEYWORDS = ["ampliación", "remodelación", "modificación", "obra nueva", "regularización", "edificación", "obra menor"]
 MIN_METROS = 200.0
 
-# Filtros de Carpetas (Donde buscar el año)
 CARPETAS_PISTA = ["obras", "edificación", "urban", "permiso", "dom", "construc"]
 
-# Lista Negra ESTRICTA
 CARPETAS_IGNORAR = [
     "ley 20.898", "20.898", "cuentas", "loteo", "subdivisión", 
     "copropiedad", "certificados", "recepción", "anteproyecto", 
@@ -115,20 +113,32 @@ def click_js(driver, elemento):
     time.sleep(0.5)
     driver.execute_script("arguments[0].click();", elemento)
 
-def volver_atras(driver):
-    try:
-        migas = driver.find_elements(By.CSS_SELECTOR, ".ui-breadcrumb a")
-        if len(migas) >= 2:
-            click_js(driver, migas[-2])
-            time.sleep(4)
-            return
-    except: pass
-    driver.back()
-    time.sleep(4)
+# ==========================================
+# NAVEGACIÓN ESTABLE
+# ==========================================
 
-# ==========================================
-# NAVEGACIÓN INTELIGENTE V16 (PRIORIDAD)
-# ==========================================
+def volver_seguro_al_anio(driver, anio_texto):
+    """
+    Intenta volver a la carpeta del AÑO usando la barra de navegación superior (breadcrumbs).
+    Esto es mucho más seguro que 'Atrás' porque fuerza la recarga de la lista de meses.
+    """
+    print(f"    << Volviendo a carpeta '{anio_texto}'...")
+    try:
+        # Buscamos un enlace en la parte superior que contenga el AÑO (ej: "2024")
+        # Usamos XPATH para buscar en todo el cuerpo, priorizando breadcrumbs si existen
+        xpath_anio = f"//a[contains(text(), '{anio_texto}')]"
+        link_anio = WebDriverWait(driver, 5).until(EC.element_to_be_clickable((By.XPATH, xpath_anio)))
+        click_js(driver, link_anio)
+        
+        # ESPERA CRÍTICA: Esperamos a que la tabla de meses vuelva a cargar
+        time.sleep(5) 
+        return True
+    except:
+        # Si falla, usamos el método clásico
+        print("       (Miga no encontrada, usando Back clásico)")
+        driver.back()
+        time.sleep(5)
+        return True
 
 def es_carpeta_valida(texto):
     texto = texto.lower()
@@ -138,17 +148,13 @@ def es_carpeta_valida(texto):
     return True
 
 def obtener_puntaje_carpeta(nombre_carpeta):
-    """
-    Asigna puntaje para ordenar carpetas. 
-    Queremos que entre PRIMERO a 'Permisos de Obras'.
-    """
     nombre = nombre_carpeta.lower()
-    if "permisos de obras" in nombre: return 100 # Máxima prioridad
+    if "permisos de obras" in nombre: return 100
     if "permisos de edificación" in nombre: return 90
     if "edificación" in nombre: return 80
     if "dirección de obras" in nombre: return 70
     if "obras municipales" in nombre: return 60
-    return 10 # Prioridad baja (ej: Modificación, Urbanización)
+    return 10
 
 def buscar_ruta_hacia_anio(driver, anio_objetivo, profundidad=0, visitados=None):
     if profundidad > 3: return False 
@@ -169,25 +175,21 @@ def buscar_ruta_hacia_anio(driver, anio_objetivo, profundidad=0, visitados=None)
     # 2. Recopilar carpetas pista
     candidatos = []
     links = driver.find_elements(By.TAG_NAME, "a")
-    
     for l in links:
         try:
             if l.is_displayed():
                 txt = l.text.strip()
                 if not txt: continue
                 if txt in visitados: continue
-                
                 if any(pista in txt.lower() for pista in CARPETAS_PISTA) and es_carpeta_valida(txt):
                     candidatos.append(txt)
         except: pass
     
-    # Deduplicar y ORDENAR POR PRIORIDAD
     candidatos = sorted(list(set(candidatos)), key=obtener_puntaje_carpeta, reverse=True)
     
     if profundidad == 0:
-        print(f"  👀 Carpetas posibles (Ordenadas por prioridad): {candidatos}")
+        print(f"  👀 Carpetas posibles: {candidatos}")
 
-    # 3. Explorar
     for carpeta in candidatos:
         print(f"  🔎 (Nivel {profundidad}) Entrando a: {carpeta}...")
         visitados.add(carpeta)
@@ -201,12 +203,11 @@ def buscar_ruta_hacia_anio(driver, anio_objetivo, profundidad=0, visitados=None)
                 return True 
             
             print(f"  ↩️ No estaba en {carpeta}, volviendo...")
-            volver_atras(driver)
+            driver.back(); time.sleep(3)
             
         except Exception as e:
-            print(f"     Salto {carpeta}: {e}")
             try: 
-                if "no such element" not in str(e): volver_atras(driver) 
+                if "no such element" not in str(e): driver.back(); time.sleep(3)
             except: pass
 
     return False
@@ -301,8 +302,9 @@ def procesar_contenido_del_mes(driver, nombre_comuna, anio, mes):
                     driver.back()
                 else:
                     total += analizar_tabla_final(driver, nombre_comuna, anio, mes)
-                    volver_atras(driver)
-            except: volver_atras(driver)
+                    # Usamos back normal aquí porque es subnivel
+                    driver.back(); time.sleep(3)
+            except: driver.back(); time.sleep(3)
             
     return total
 
@@ -347,7 +349,13 @@ def procesar_comuna(driver, nombre_comuna):
                 meses = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", 
                          "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
                 for mes in meses:
+                    # Búsqueda robusta del mes
                     xp_mes = f"//a[contains(translate(text(), 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), '{mes.upper()}')]"
+                    
+                    # Esperamos que la lista de meses esté visible
+                    try: WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.XPATH, xp_mes)))
+                    except: pass # Si no está el mes, no pasa nada, seguimos al siguiente
+
                     elems = driver.find_elements(By.XPATH, xp_mes)
                     l_mes = None
                     for e in elems:
@@ -357,7 +365,13 @@ def procesar_comuna(driver, nombre_comuna):
                         print(f"    📂 {mes}...")
                         click_js(driver, l_mes); time.sleep(3)
                         total_comuna += procesar_contenido_del_mes(driver, nombre_comuna, anio, mes)
-                        volver_atras(driver)
+                        
+                        # RETORNO SEGURO: Volver al AÑO, no solo "Atrás"
+                        volver_seguro_al_anio(driver, anio)
+                    else:
+                        # Debug para saber si saltó el mes
+                        # print(f"       (No vi carpeta {mes})") 
+                        pass
                 
                 print("    🔄 Reiniciando a Punto 7 para siguiente año...")
                 try:
@@ -383,7 +397,7 @@ def procesar_comuna(driver, nombre_comuna):
 
 def main():
     driver = configurar_driver()
-    print("--- ROBOT V16: PRIORIDAD INTELIGENTE ---")
+    print("--- ROBOT V17: ITERADOR ESTABLE (Sin saltos de meses) ---")
     for c in COMUNAS: procesar_comuna(driver, c)
     driver.quit()
 
