@@ -86,59 +86,88 @@ def mover_archivo(carpeta_destino):
         return True
     except: return False
 
+def arreglar_url_drive(url):
+    """
+    Convierte un link de Visor de Drive en un Link de Descarga Directa.
+    """
+    # Patrón para extraer el ID del archivo de Drive
+    match_id = re.search(r'/file/d/([a-zA-Z0-9_-]+)', url)
+    if match_id:
+        file_id = match_id.group(1)
+        # Construimos la URL mágica de descarga
+        nueva_url = f"https://drive.google.com/uc?export=download&id={file_id}"
+        print(f"         [DRIVE FIX] ID extraído: {file_id}")
+        return nueva_url
+    return url
+
 def descargar_pdf_por_url(url, carpeta_destino, cookies_selenium, nombre_sugerido="documento.pdf"):
-    print(f"         [PLAN B] Descarga directa URL...")
+    print(f"         [PLAN B] Iniciando descarga: {url[:30]}...")
+    
+    # 1. Corrección para Google Drive
+    url_final = url
+    if "drive.google.com" in url:
+        url_final = arreglar_url_drive(url)
+
     try:
         if not os.path.exists(carpeta_destino): os.makedirs(carpeta_destino)
         session = requests.Session()
-        for cookie in cookies_selenium:
-            session.cookies.set(cookie['name'], cookie['value'])
         
-        response = session.get(url, stream=True, verify=False)
+        # Solo usamos cookies si NO es google drive (Drive a veces falla con cookies ajenas)
+        if "drive.google" not in url_final:
+            for cookie in cookies_selenium:
+                session.cookies.set(cookie['name'], cookie['value'])
+        
+        response = session.get(url_final, stream=True, verify=False)
+        
+        # VERIFICACIÓN CRÍTICA: ¿Es realmente un PDF o es HTML basura?
+        content_type = response.headers.get('Content-Type', '').lower()
+        if 'text/html' in content_type and "drive.google" not in url_final:
+            print("         [ERROR] El archivo descargado es una WEB (HTML), no un PDF.")
+            return False
+
+        # Nombre del archivo
         nombre_archivo = nombre_sugerido
         if "Content-Disposition" in response.headers:
             fname = re.findall("filename=(.+)", response.headers["Content-Disposition"])
             if fname: nombre_archivo = fname[0].strip('"')
 
+        # Forzar extensión .pdf si no la tiene
+        if not nombre_archivo.lower().endswith(".pdf"):
+            nombre_archivo += ".pdf"
+
         ruta_final = os.path.join(carpeta_destino, nombre_archivo)
         with open(ruta_final, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
                 f.write(chunk)
+                
         print(f"      [DESCARGA OK - DIRECTO] {nombre_archivo}")
         return True
-    except: return False
+    except Exception as e:
+        print(f"      [ERROR PLAN B] {e}")
+        return False
 
 def click_js(driver, elemento):
     driver.execute_script("arguments[0].scrollIntoView();", elemento)
     time.sleep(0.5)
     driver.execute_script("arguments[0].click();", elemento)
 
-# ==========================================
-# NAVEGACIÓN ESTABLE
-# ==========================================
-
 def volver_seguro_al_anio(driver, anio_texto):
-    """
-    Intenta volver a la carpeta del AÑO usando la barra de navegación superior (breadcrumbs).
-    Esto es mucho más seguro que 'Atrás' porque fuerza la recarga de la lista de meses.
-    """
     print(f"    << Volviendo a carpeta '{anio_texto}'...")
     try:
-        # Buscamos un enlace en la parte superior que contenga el AÑO (ej: "2024")
-        # Usamos XPATH para buscar en todo el cuerpo, priorizando breadcrumbs si existen
         xpath_anio = f"//a[contains(text(), '{anio_texto}')]"
         link_anio = WebDriverWait(driver, 5).until(EC.element_to_be_clickable((By.XPATH, xpath_anio)))
         click_js(driver, link_anio)
-        
-        # ESPERA CRÍTICA: Esperamos a que la tabla de meses vuelva a cargar
         time.sleep(5) 
         return True
     except:
-        # Si falla, usamos el método clásico
         print("       (Miga no encontrada, usando Back clásico)")
         driver.back()
         time.sleep(5)
         return True
+
+# ==========================================
+# NAVEGACIÓN
+# ==========================================
 
 def es_carpeta_valida(texto):
     texto = texto.lower()
@@ -160,7 +189,6 @@ def buscar_ruta_hacia_anio(driver, anio_objetivo, profundidad=0, visitados=None)
     if profundidad > 3: return False 
     if visitados is None: visitados = set()
 
-    # 1. Buscar AÑO
     links = driver.find_elements(By.TAG_NAME, "a")
     for l in links:
         try:
@@ -172,7 +200,6 @@ def buscar_ruta_hacia_anio(driver, anio_objetivo, profundidad=0, visitados=None)
                     return True
         except: pass
 
-    # 2. Recopilar carpetas pista
     candidatos = []
     links = driver.find_elements(By.TAG_NAME, "a")
     for l in links:
@@ -193,23 +220,17 @@ def buscar_ruta_hacia_anio(driver, anio_objetivo, profundidad=0, visitados=None)
     for carpeta in candidatos:
         print(f"  🔎 (Nivel {profundidad}) Entrando a: {carpeta}...")
         visitados.add(carpeta)
-        
         try:
             elem = WebDriverWait(driver, 5).until(EC.element_to_be_clickable((By.PARTIAL_LINK_TEXT, carpeta)))
             click_js(driver, elem)
             time.sleep(3)
-            
             if buscar_ruta_hacia_anio(driver, anio_objetivo, profundidad + 1, visitados):
                 return True 
-            
             print(f"  ↩️ No estaba en {carpeta}, volviendo...")
             driver.back(); time.sleep(3)
-            
-        except Exception as e:
-            try: 
-                if "no such element" not in str(e): driver.back(); time.sleep(3)
+        except:
+            try: driver.back(); time.sleep(3)
             except: pass
-
     return False
 
 # ==========================================
@@ -268,11 +289,11 @@ def analizar_tabla_final(driver, nombre_comuna, anio, mes):
     return descargas
 
 def procesar_contenido_del_mes(driver, nombre_comuna, anio, mes):
+    # 1. PDF/Drive Directo
     if driver.current_url.endswith(".pdf") or "drive.google" in driver.current_url:
         print("      ⚠️ PDF/Drive Directo detectado.")
         ruta = os.path.join(BASE_DIR, nombre_comuna, anio, mes)
-        if "drive.google" not in driver.current_url:
-            descargar_pdf_por_url(driver.current_url, ruta, driver.get_cookies(), f"Doc_{mes}.pdf")
+        descargar_pdf_por_url(driver.current_url, ruta, driver.get_cookies(), f"Doc_{mes}.pdf")
         driver.back(); return 1
 
     filas = len(driver.find_elements(By.TAG_NAME, "tr"))
@@ -297,12 +318,11 @@ def procesar_contenido_del_mes(driver, nombre_comuna, anio, mes):
                 elem = WebDriverWait(driver, 5).until(EC.element_to_be_clickable((By.PARTIAL_LINK_TEXT, sub)))
                 click_js(driver, elem)
                 time.sleep(3)
-                if driver.current_url.endswith(".pdf"):
+                if driver.current_url.endswith(".pdf") or "drive.google" in driver.current_url:
                     descargar_pdf_por_url(driver.current_url, os.path.join(BASE_DIR, nombre_comuna, anio, mes), driver.get_cookies(), f"{sub}.pdf")
                     driver.back()
                 else:
                     total += analizar_tabla_final(driver, nombre_comuna, anio, mes)
-                    # Usamos back normal aquí porque es subnivel
                     driver.back(); time.sleep(3)
             except: driver.back(); time.sleep(3)
             
@@ -349,13 +369,7 @@ def procesar_comuna(driver, nombre_comuna):
                 meses = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", 
                          "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
                 for mes in meses:
-                    # Búsqueda robusta del mes
                     xp_mes = f"//a[contains(translate(text(), 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), '{mes.upper()}')]"
-                    
-                    # Esperamos que la lista de meses esté visible
-                    try: WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.XPATH, xp_mes)))
-                    except: pass # Si no está el mes, no pasa nada, seguimos al siguiente
-
                     elems = driver.find_elements(By.XPATH, xp_mes)
                     l_mes = None
                     for e in elems:
@@ -365,13 +379,7 @@ def procesar_comuna(driver, nombre_comuna):
                         print(f"    📂 {mes}...")
                         click_js(driver, l_mes); time.sleep(3)
                         total_comuna += procesar_contenido_del_mes(driver, nombre_comuna, anio, mes)
-                        
-                        # RETORNO SEGURO: Volver al AÑO, no solo "Atrás"
                         volver_seguro_al_anio(driver, anio)
-                    else:
-                        # Debug para saber si saltó el mes
-                        # print(f"       (No vi carpeta {mes})") 
-                        pass
                 
                 print("    🔄 Reiniciando a Punto 7 para siguiente año...")
                 try:
@@ -397,7 +405,7 @@ def procesar_comuna(driver, nombre_comuna):
 
 def main():
     driver = configurar_driver()
-    print("--- ROBOT V17: ITERADOR ESTABLE (Sin saltos de meses) ---")
+    print("--- ROBOT V18: DRIVE FIX + BACK ESTABLE ---")
     for c in COMUNAS: procesar_comuna(driver, c)
     driver.quit()
 
